@@ -204,6 +204,10 @@ pub fn execute_program_entry(
     let mut env = Environment::new();
     let mut diagnostics = Vec::new();
 
+    if program.blocks.is_empty() {
+        return Err(DiagnosticError::from(RuntimeError::NoEntryPoint));
+    }
+
     let entry = registry
         .get_entry(entry_name)
         .ok_or_else(|| {
@@ -360,6 +364,10 @@ pub fn invoke_block(
 ) -> Result<RuntimeValue, DiagnosticError> {
     let block_name = block_ref.block_name();
 
+    if depth > crate::evaluator::MAX_DEPTH {
+        return Err(RuntimeError::StackOverflow.into());
+    }
+
     match block_ref {
         BlockReference::Local(_) => {
             let block = registry
@@ -368,13 +376,13 @@ pub fn invoke_block(
                 .clone();
 
             let result =
-                execute_block(&block, arguments, env, registry, output, depth, diagnostics)?;
+                execute_block(&block, arguments, env, registry, output, depth + 1, diagnostics)?;
 
             if evaluate_result {
                 // ![args](#block): evaluate the Document result
                 match result {
                     RuntimeValue::Document(doc) => {
-                        evaluate_document(&doc, env, registry, output, depth, diagnostics)
+                        evaluate_document(&doc, env, registry, output, depth + 1, diagnostics)
                     }
                     other => Ok(other),
                 }
@@ -385,12 +393,12 @@ pub fn invoke_block(
         BlockReference::LocalImport { path, .. } => {
             let block = registry.get_imported(path, block_name)?;
             let result =
-                execute_block(&block, arguments, env, registry, output, depth, diagnostics)?;
+                execute_block(&block, arguments, env, registry, output, depth + 1, diagnostics)?;
 
             if evaluate_result {
                 match result {
                     RuntimeValue::Document(doc) => {
-                        evaluate_document(&doc, env, registry, output, depth, diagnostics)
+                        evaluate_document(&doc, env, registry, output, depth + 1, diagnostics)
                     }
                     other => Ok(other),
                 }
@@ -450,26 +458,43 @@ fn evaluate_inline(
     match inline {
         InlineNode::Text(s) => Ok(RuntimeValue::String(s.clone())),
         InlineNode::Strong(children) => {
-            // Bold = print
+            // Bold = print. Parse {expr} templates in text children.
             let mut text = String::new();
             for child in children {
-                let val = evaluate_inline(child, env, registry, output, depth, diagnostics)?;
-                text.push_str(&val.to_string());
+                match child {
+                    InlineNode::Text(s) if s.contains('{') => {
+                        // Parse as template and evaluate expressions
+                        let source_id = registry.source_id;
+                        let span = 0..0;
+                        match mdl::parser::expression::parse_text_template(s, source_id) {
+                            Ok(ts) => {
+                                let val = crate::evaluator::eval_template_string(
+                                    &ts, env, registry, output, depth, diagnostics, source_id, &span,
+                                )?;
+                                text.push_str(&val);
+                            }
+                            Err(_) => text.push_str(s),
+                        }
+                    }
+                    _ => {
+                        let val = evaluate_inline(child, env, registry, output, depth, diagnostics)?;
+                        text.push_str(&val.to_string());
+                    }
+                }
             }
             writeln!(output, "{}", text)
                 .map_err(|e| DiagnosticError::from(RuntimeError::IoError(e.to_string())))?;
             Ok(RuntimeValue::Unit)
         }
         InlineNode::Strikethrough(children) => {
-            // Strikethrough = null
-            let mut inlines = Vec::new();
-            for child in children {
-                inlines.push(child.clone());
-            }
-            let doc = mdl::document::Document {
-                nodes: vec![mdl::document::DocumentNode::Paragraph(inlines)],
+            // Strikethrough = null; eagerly evaluate children to get the inner value
+            let inner_doc = mdl::document::Document {
+                nodes: vec![mdl::document::DocumentNode::Paragraph(children.clone())],
             };
-            Ok(RuntimeValue::Strikethrough(doc))
+            let inner = evaluate_document(&inner_doc, env, registry, output, depth, diagnostics)?;
+            Ok(RuntimeValue::Strikethrough(
+                crate::runtime_value::StrikethroughPayload::Eager(Box::new(inner)),
+            ))
         }
         InlineNode::Link { dest, .. } => {
             // Link = block invocation

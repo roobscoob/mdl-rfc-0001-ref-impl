@@ -6,7 +6,7 @@ expect_output = "30"
 1. **{[10](#Double)}**
 
 ## Double
-1. **{[#0 * 2](#AddTen)}**
+1. [#0 * 2](#AddTen)
 
 ### AddTen
 1. #0 + 10

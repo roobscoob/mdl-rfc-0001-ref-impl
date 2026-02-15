@@ -328,7 +328,7 @@ fn recursive_factorial() {
 fn spread_argument() {
     // Use spread ref in a non-bold context (assignment), then print the result
     let src = "# Main\n1. [42](#Echo)\n\n## Echo\n1. x = #*\n2. **{x}**";
-    assert_eq!(run_trimmed(src), "42");
+    assert_eq!(run_trimmed(src), "[42]");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 ---
-description = "Evaluated invocation runs print and evaluates Document"
+description = "Evaluated invocation evaluates Document body"
 expect_output = "2"
 ---
 # Main

@@ -1,6 +1,6 @@
 ---
-description = "Logical NOT on number is type error"
-expect_error = "type error"
+description = "Logical NOT on truthy number returns false"
+expect_output = "false"
 ---
 # Main
 1. **{!5}**

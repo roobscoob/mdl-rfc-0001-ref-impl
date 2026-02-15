@@ -1,6 +1,6 @@
 ---
 description = "Match emphasis document pattern"
-expect_output = "italic content"
+expect_output = "hello"
 ---
 # Main
 1. doc = [](#EmDoc)

@@ -1,8 +1,6 @@
 ---
-description = "Cross-scope block accessing parent var warns"
-
-[[expect_warnings]]
-contains = "non-lexical"
+description = "Cross-scope block cannot access unexecuted parent var"
+expect_error = "undefined variable"
 ---
 # Main
 1. [](#Foreign)

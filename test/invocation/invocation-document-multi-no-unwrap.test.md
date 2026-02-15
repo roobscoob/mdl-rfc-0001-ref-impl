@@ -1,6 +1,6 @@
 ---
 description = "Multi-element Document is not unwrapped"
-expect_output = "First paragraph.\n\nSecond paragraph."
+expect_output = "First paragraph.\nSecond paragraph."
 ---
 # Main
 1. **{[](#Multi)}**

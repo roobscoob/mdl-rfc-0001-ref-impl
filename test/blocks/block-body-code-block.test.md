@@ -1,6 +1,6 @@
 ---
 description = "Block body with fenced code block"
-expect_output = """```
+expect_output = """```js
 console.log(1)
 ```"""
 ---

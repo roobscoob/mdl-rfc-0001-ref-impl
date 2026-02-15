@@ -1,6 +1,6 @@
 ---
 description = "Table from block body"
-expect_output = "| Name  | Age |\n|-------|-----|\n| Alice | 30  |\n| Bob   | 25  |"
+expect_output = "| Name | Age |\n|---|---|\n| Alice | 30 |\n| Bob | 25 |"
 ---
 # Main
 1. **{[](#Data)}**

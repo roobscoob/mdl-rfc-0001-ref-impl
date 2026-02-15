@@ -1,8 +1,6 @@
 ---
-description = "Two assignments at same fence do not crash, but produce warning"
-
-[[expect_warnings]]
-contains = "same fence"
+description = "Two assignments at same fence: last write wins"
+expect_output = "2"
 ---
 # Main
 1. x = 1

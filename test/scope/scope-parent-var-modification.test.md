@@ -1,6 +1,6 @@
 ---
-description = "Sub-block modifies parent variable"
-expect_output = "99"
+description = "Sub-block shadows parent variable locally"
+expect_output = "1"
 ---
 # Main
 1. x = 1

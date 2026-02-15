@@ -61,6 +61,7 @@ enum Token {
 
     // Markdown-derived compound tokens
     Bold(TemplateString),
+    Emphasis(TemplateString),
     Strike(TemplateString),
     Link { text_tokens: Vec<Token>, dest: String },
     Image { text_tokens: Vec<Token>, dest: String },
@@ -131,6 +132,72 @@ pub fn parse_instruction(
     }
 }
 
+/// Parse a raw text string as a template, extracting `{expr}` regions.
+/// Re-uses the expression tokenizer and parser.
+pub fn parse_text_template(
+    text: &str,
+    file_id: usize,
+) -> Result<TemplateString, ParseError> {
+    let span = 0..text.len();
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '{' {
+            // Find matching closing brace
+            let mut depth = 1;
+            let start = i + 1;
+            i += 1;
+            while i < chars.len() && depth > 0 {
+                if chars[i] == '{' {
+                    depth += 1;
+                } else if chars[i] == '}' {
+                    depth -= 1;
+                }
+                if depth > 0 {
+                    i += 1;
+                }
+            }
+            if depth == 0 {
+                // Flush literal
+                if !literal.is_empty() {
+                    parts.push(TemplateStringPart::Literal(std::mem::take(&mut literal)));
+                }
+                // Parse expression between braces
+                let expr_text: String = chars[start..i].iter().collect();
+                let mut tokens = Vec::new();
+                tokenize_text(&expr_text, &mut tokens, 0)
+                    .map_err(|msg| ParseError::error(msg, span.clone(), file_id))?;
+                merge_compound_operators(&mut tokens);
+                let mut parser = ExprParser::new(tokens, span.clone(), file_id);
+                let expr = parser.parse_expr(0)?;
+                parts.push(TemplateStringPart::Expression(expr));
+                i += 1; // skip closing }
+            } else {
+                // Unmatched brace, treat as literal
+                literal.push('{');
+                literal.extend(chars[start..].iter());
+                break;
+            }
+        } else {
+            literal.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if !literal.is_empty() {
+        parts.push(TemplateStringPart::Literal(literal));
+    }
+
+    if parts.is_empty() {
+        parts.push(TemplateStringPart::Literal(String::new()));
+    }
+
+    Ok(TemplateString { parts })
+}
+
 // ---------------------------------------------------------------------------
 // Tokenizer: pulldown-cmark events → Token stream
 // ---------------------------------------------------------------------------
@@ -152,7 +219,8 @@ fn tokenize_events(
             }
 
             Event::Text(s) => {
-                tokenize_text(s, &mut tokens, range.start);
+                tokenize_text(s, &mut tokens, range.start)
+                    .map_err(|msg| ParseError::error(msg, span.clone(), file_id))?;
                 i += 1;
             }
 
@@ -205,10 +273,9 @@ fn tokenize_events(
             }
 
             Event::Start(Tag::Emphasis) => {
-                // Emphasis has no executable semantics; treat inner as plain tokens
                 i += 1;
-                let inner = collect_until_end(events, &mut i, |e| matches!(e, TagEnd::Emphasis), file_id, span.clone())?;
-                tokens.extend(inner);
+                let ts = collect_template_string(events, &mut i, &|e| matches!(e, TagEnd::Emphasis), file_id, span.clone())?;
+                tokens.push(Token::Emphasis(ts));
             }
 
             // Skip other events we don't handle in expression context
@@ -290,9 +357,87 @@ fn collect_until_end(
     tokenize_events(&inner_events, file_id, span)
 }
 
+/// Parse a text string for `{expr}` interpolations, returning template parts.
+/// If an opening `{` is found without a matching `}` in this text, the remaining
+/// text is pushed into `expr_events` and `brace_depth` is left > 0 so the caller
+/// knows to continue collecting events for the expression.
+fn parse_template_text_with_braces<'a>(
+    s: &str,
+    brace_depth: &mut u32,
+    expr_events: &mut Vec<(Event<'a>, Range<usize>)>,
+    range: &Range<usize>,
+    span: &Range<usize>,
+    file_id: usize,
+) -> Result<Vec<TemplateStringPart>, ParseError> {
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut ci = 0;
+
+    while ci < chars.len() {
+        if chars[ci] == '{' {
+            // Flush literal
+            if !literal.is_empty() {
+                parts.push(TemplateStringPart::Literal(std::mem::take(&mut literal)));
+            }
+            ci += 1;
+            // Find matching } within this text
+            let start = ci;
+            let mut depth = 1u32;
+            while ci < chars.len() {
+                if chars[ci] == '{' {
+                    depth += 1;
+                } else if chars[ci] == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                ci += 1;
+            }
+            if depth == 0 {
+                // Complete expression within this text
+                let expr_text: String = chars[start..ci].iter().collect();
+                ci += 1; // skip }
+                // Calculate source-relative byte offset for the expression
+                let byte_start: usize = chars[..start].iter().map(|c| c.len_utf8()).sum();
+                let expr_offset = range.start + byte_start;
+                let mut tokens = Vec::new();
+                tokenize_text(&expr_text, &mut tokens, expr_offset)
+                    .map_err(|msg| ParseError::error(msg, span.clone(), file_id))?;
+                let mut parser = ExprParser::new(tokens, span.clone(), file_id);
+                let expr = parser.parse_expr(0)?;
+                parts.push(TemplateStringPart::Expression(expr));
+            } else {
+                // Expression spans beyond this text event
+                *brace_depth = depth;
+                let rest: String = chars[start..].iter().collect();
+                if !rest.is_empty() {
+                    expr_events.push((Event::Text(rest.into()), range.clone()));
+                }
+                break;
+            }
+        } else {
+            literal.push(chars[ci]);
+            ci += 1;
+        }
+    }
+
+    if !literal.is_empty() {
+        parts.push(TemplateStringPart::Literal(literal));
+    }
+
+    Ok(parts)
+}
+
 /// Collect the contents of a Bold/Strike tag and build a TemplateString directly.
 /// Text is preserved literally (whitespace included) with `{expr}` interpolations.
-/// Links and images become expression parts (block invocations).
+/// Links and images inside `{...}` become expression parts (block invocations).
+///
+/// `{expr}` interpolations may span multiple pulldown-cmark events — for example
+/// `**{[5](#Add)}**` produces Text("{") → Link → Text("}"). This function tracks
+/// brace depth across events so the entire `{...}` region is collected and parsed
+/// as a single expression.
 fn collect_template_string(
     events: &[(Event<'_>, Range<usize>)],
     i: &mut usize,
@@ -301,61 +446,187 @@ fn collect_template_string(
     span: Range<usize>,
 ) -> Result<TemplateString, ParseError> {
     let mut parts: Vec<TemplateStringPart> = Vec::new();
+    // When > 0, we are inside `{...}` and collecting events for an expression.
+    let mut brace_depth: u32 = 0;
+    let mut expr_events: Vec<(Event<'_>, Range<usize>)> = Vec::new();
+    let mut current_literal = String::new();
 
     while *i < events.len() {
-        let (ref ev, ref _range) = events[*i];
-        match ev {
-            Event::End(tag_end) if is_end(tag_end) => {
-                *i += 1;
-                break;
+        let (ref ev, ref range) = events[*i];
+
+        // Check for the closing tag of the Bold/Strike container
+        if brace_depth == 0 {
+            if let Event::End(tag_end) = ev {
+                if is_end(tag_end) {
+                    *i += 1;
+                    break;
+                }
             }
+        }
+
+        match ev {
             Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {
                 *i += 1;
             }
-            Event::Text(s) => {
-                // Parse text as template: literal text with {expr} interpolations
-                let text_parts = parse_template_parts(s, file_id, span.clone())?;
-                parts.extend(text_parts);
+
+            Event::Text(s) if brace_depth == 0 => {
+                // Outside braces: scan for `{` to enter expression mode.
+                // A single text event may contain multiple `{expr}` regions
+                // (e.g. `{x} + {y}`), so we loop through the entire text.
+                let text_parts = parse_template_text_with_braces(s, &mut brace_depth, &mut expr_events, range, &span, file_id)?;
+                for part in text_parts {
+                    match part {
+                        TemplateStringPart::Literal(s) => current_literal.push_str(&s),
+                        expr_part => {
+                            if !current_literal.is_empty() {
+                                parts.push(TemplateStringPart::Literal(
+                                    std::mem::take(&mut current_literal),
+                                ));
+                            }
+                            parts.push(expr_part);
+                        }
+                    }
+                }
                 *i += 1;
             }
+
+            Event::Text(s) if brace_depth > 0 => {
+                // Inside braces: check if this text contains the closing `}`
+                let mut found_close = false;
+                let chars: Vec<char> = s.chars().collect();
+                let mut ci = 0;
+                while ci < chars.len() {
+                    if chars[ci] == '{' {
+                        brace_depth += 1;
+                    } else if chars[ci] == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            // Text before } goes into expr_events
+                            let before: String = chars[..ci].iter().collect();
+                            if !before.is_empty() {
+                                expr_events.push((
+                                    Event::Text(before.into()),
+                                    range.clone(),
+                                ));
+                            }
+                            // Parse collected events as expression
+                            let tokens = tokenize_events(
+                                &expr_events,
+                                file_id,
+                                span.clone(),
+                            )?;
+                            expr_events.clear();
+                            let mut parser =
+                                ExprParser::new(tokens, span.clone(), file_id);
+                            let expr = parser.parse_expr(0)?;
+                            parts.push(TemplateStringPart::Expression(expr));
+
+                            // Text after } continues as literal
+                            let after: String = chars[ci + 1..].iter().collect();
+                            current_literal.push_str(&after);
+                            found_close = true;
+                            break;
+                        }
+                    }
+                    ci += 1;
+                }
+                if !found_close {
+                    expr_events.push((ev.clone(), range.clone()));
+                }
+                *i += 1;
+            }
+
+            // When inside braces, collect Link/Image/other events for expression parsing
+            _ if brace_depth > 0 => {
+                expr_events.push((ev.clone(), range.clone()));
+                *i += 1;
+            }
+
+            // Outside braces: handle non-text events as literals
             Event::Code(s) => {
-                parts.push(TemplateStringPart::Literal(s.to_string()));
+                current_literal.push_str(s);
                 *i += 1;
             }
             Event::SoftBreak => {
-                parts.push(TemplateStringPart::Literal(" ".to_string()));
+                current_literal.push(' ');
                 *i += 1;
             }
             Event::HardBreak => {
-                parts.push(TemplateStringPart::Literal("\n".to_string()));
+                current_literal.push('\n');
                 *i += 1;
             }
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                let dest = dest_url.to_string();
-                *i += 1;
-                let inner = collect_until_end(events, i, |e| matches!(e, TagEnd::Link), file_id, span.clone())?;
-                let block_ref = parse_block_reference(&dest);
-                let args = parse_argument_list(inner, file_id, span.clone())?;
-                parts.push(TemplateStringPart::Expression(Value::BlockInvocation(args, block_ref)));
-            }
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                let dest = dest_url.to_string();
-                *i += 1;
-                let inner = collect_until_end(events, i, |e| matches!(e, TagEnd::Image), file_id, span.clone())?;
-                let block_ref = parse_block_reference(&dest);
-                let args = parse_argument_list(inner, file_id, span.clone())?;
-                parts.push(TemplateStringPart::Expression(Value::EvaluatedBlockInvocation(args, block_ref)));
-            }
+
             Event::Start(Tag::Emphasis) => {
-                // Emphasis inside bold has no special meaning; pass through inner content
                 *i += 1;
-                let inner_ts = collect_template_string(events, i, &|e| matches!(e, TagEnd::Emphasis), file_id, span.clone())?;
+                let inner_ts = collect_template_string(
+                    events,
+                    i,
+                    &|e| matches!(e, TagEnd::Emphasis),
+                    file_id,
+                    span.clone(),
+                )?;
+                // Merge inner emphasis parts
+                if !current_literal.is_empty() {
+                    parts.push(TemplateStringPart::Literal(
+                        std::mem::take(&mut current_literal),
+                    ));
+                }
                 parts.extend(inner_ts.parts);
             }
+
+            // Link/Image outside braces: treat as expression
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if !current_literal.is_empty() {
+                    parts.push(TemplateStringPart::Literal(
+                        std::mem::take(&mut current_literal),
+                    ));
+                }
+                let dest = dest_url.to_string();
+                *i += 1;
+                let inner = collect_until_end(
+                    events,
+                    i,
+                    |e| matches!(e, TagEnd::Link),
+                    file_id,
+                    span.clone(),
+                )?;
+                let block_ref = parse_block_reference(&dest);
+                let args = parse_argument_list(inner, file_id, span.clone())?;
+                parts.push(TemplateStringPart::Expression(
+                    Value::BlockInvocation(args, block_ref),
+                ));
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                if !current_literal.is_empty() {
+                    parts.push(TemplateStringPart::Literal(
+                        std::mem::take(&mut current_literal),
+                    ));
+                }
+                let dest = dest_url.to_string();
+                *i += 1;
+                let inner = collect_until_end(
+                    events,
+                    i,
+                    |e| matches!(e, TagEnd::Image),
+                    file_id,
+                    span.clone(),
+                )?;
+                let block_ref = parse_block_reference(&dest);
+                let args = parse_argument_list(inner, file_id, span.clone())?;
+                parts.push(TemplateStringPart::Expression(
+                    Value::EvaluatedBlockInvocation(args, block_ref),
+                ));
+            }
+
             _ => {
                 *i += 1;
             }
         }
+    }
+
+    // Flush remaining literal
+    if !current_literal.is_empty() {
+        parts.push(TemplateStringPart::Literal(current_literal));
     }
 
     if parts.is_empty() {
@@ -409,20 +680,33 @@ fn collect_single_match_arm(
     let mut current_span = &mut pattern_span;
     let mut current_events = &mut pattern_events;
     let mut writing_to_pattern = false;
+    let mut list_depth = 0u32; // Track nested lists to avoid breaking on inner End(Item)
 
-    // Collect all events of this arm until End(Item)
+    // Collect all events of this arm until End(Item) at depth 0
     while *i < events.len() {
         let (ref ev, ref span) = events[*i];
         if current_span.start == 0 {
             *current_span = span.clone();
         }
         match ev {
-            Event::End(TagEnd::Item) => {
+            Event::End(TagEnd::Item) if list_depth == 0 => {
                 *i += 1;
                 current_span.end = span.end;
                 break;
             }
-            Event::Text(text) if !writing_to_pattern && text.contains(":") => {
+            Event::Start(Tag::List(_)) => {
+                list_depth += 1;
+                *i += 1;
+                current_span.end = span.end;
+                current_events.push((ev.clone(), span.clone()));
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                *i += 1;
+                current_span.end = span.end;
+                current_events.push((ev.clone(), span.clone()));
+            }
+            Event::Text(text) if !writing_to_pattern && list_depth == 0 && text.contains(":") => {
                 *i += 1;
                 let (before, after) = text.split_once(":").unwrap();
                 current_events.push((Event::Text(before.into()), current_span.end..span.start));
@@ -467,7 +751,7 @@ fn collect_single_match_arm(
 // Text tokenizer: raw text string → Token stream
 // ---------------------------------------------------------------------------
 
-fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) {
+fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) -> Result<(), String> {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     let mut i = 0;
@@ -498,10 +782,11 @@ fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) {
                 while i < len && chars[i] != '"' {
                     i += 1;
                 }
-                let s: String = chars[start..i].iter().collect();
-                if i < len {
-                    i += 1; // skip closing quote
+                if i >= len {
+                    return Err("unclosed string literal".to_string());
                 }
+                let s: String = chars[start..i].iter().collect();
+                i += 1; // skip closing quote
                 tokens.push(Token::StringLit(s));
             }
 
@@ -640,6 +925,7 @@ fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) {
             }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +970,7 @@ enum TokenKind {
     LBrace,
     RBrace,
     Bold,
+    Emphasis,
     Strike,
     Link,
     Image,
@@ -728,6 +1015,7 @@ fn token_kind(t: &Token) -> TokenKind {
         Token::LBrace => TokenKind::LBrace,
         Token::RBrace => TokenKind::RBrace,
         Token::Bold(_) => TokenKind::Bold,
+        Token::Emphasis(_) => TokenKind::Emphasis,
         Token::Strike(_) => TokenKind::Strike,
         Token::Link { .. } => TokenKind::Link,
         Token::Image { .. } => TokenKind::Image,
@@ -924,6 +1212,25 @@ impl ExprParser {
             // Bold = Print
             Token::Bold(ts) => Ok(Value::Print(ts)),
 
+            // Emphasis = transparent wrapper; unwrap to inner value
+            Token::Emphasis(ts) => {
+                if ts.parts.len() == 1 {
+                    match &ts.parts[0] {
+                        TemplateStringPart::Expression(val) => Ok(val.clone()),
+                        TemplateStringPart::Literal(s) => {
+                            let mut inner_tokens = Vec::new();
+                            tokenize_text(s, &mut inner_tokens, 0)
+                                .map_err(|msg| self.error(msg))?;
+                            merge_compound_operators(&mut inner_tokens);
+                            let mut inner = ExprParser::new(inner_tokens, self.span.clone(), self.file_id);
+                            inner.parse_expr(0)
+                        }
+                    }
+                } else {
+                    Ok(Value::Interpolation(ts))
+                }
+            }
+
             // Strikethrough = null / quotation
             Token::Strike(ts) => Ok(Value::Strikethrough(ts)),
 
@@ -991,7 +1298,12 @@ impl ExprParser {
 
         for arm in arms {
             if arm.is_otherwise {
-                let binding = match arm.pattern.0.get(0) {
+                // Pattern tokens may still start with "otherwise" keyword; skip it
+                let binding_idx = match arm.pattern.0.get(0) {
+                    Some(Token::Ident(s, _)) if s == "otherwise" => 1,
+                    _ => 0,
+                };
+                let binding = match arm.pattern.0.get(binding_idx) {
                     Some(Token::Ident(ident, _)) => Some(ident.clone()),
                     Some(Token::Underscore) | None => None,
                     Some(_) => return Err(ParseError::error("expected binding", arm.pattern.1, self.file_id)),
@@ -1078,7 +1390,8 @@ fn parse_template_parts(
             }
             // Parse the expression
             let mut tokens = Vec::new();
-            tokenize_text(&expr_str, &mut tokens, 0);
+            tokenize_text(&expr_str, &mut tokens, 0)
+                .map_err(|msg| ParseError::error(msg, span.clone(), file_id))?;
             let mut parser = ExprParser::new(tokens, span.clone(), file_id);
             let expr = parser.parse_expr(0)?;
             parts.push(TemplateStringPart::Expression(expr));
@@ -1200,8 +1513,83 @@ fn parse_single_pattern(
         [Token::StringLit(string)] => Ok(Template::StringLiteral(string.clone())),
         [Token::Underscore] => Ok(Template::Wildcard),
         [Token::Ident(ident, _span)] => Ok(Template::Binding(ident.clone())),
+        [Token::Strike(ts)] => {
+            // Strikethrough pattern: ~~binding~~ or ~~literal~~
+            let inner = template_to_pattern_binding(ts);
+            Ok(Template::Strikethrough(inner.map(Box::new)))
+        }
+        [Token::Bold(ts)] => {
+            // Bold pattern: **{binding}** or **literal**
+            let inner = template_to_inline_patterns(ts);
+            Ok(Template::DocumentPattern(
+                crate::instruction::template::DocumentPattern::Inline(
+                    crate::instruction::template::InlinePattern::Strong(inner),
+                ),
+            ))
+        }
+        [Token::Emphasis(ts)] => {
+            // Emphasis pattern: *{binding}* or *literal*
+            let inner = template_to_inline_patterns(ts);
+            Ok(Template::DocumentPattern(
+                crate::instruction::template::DocumentPattern::Inline(
+                    crate::instruction::template::InlinePattern::Emphasis(inner),
+                ),
+            ))
+        }
         _ => Err(ParseError::error(
             "expected pattern", span, file_id
         ))
     }
+}
+
+/// Extract a binding or literal from a template string for use as a pattern.
+fn template_to_pattern_binding(
+    ts: &TemplateString,
+) -> Option<crate::instruction::template::Template> {
+    use crate::instruction::template::Template;
+
+    if ts.parts.len() == 1 {
+        match &ts.parts[0] {
+            TemplateStringPart::Literal(s) => {
+                let s = s.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(Template::Binding(s.to_string()))
+                }
+            }
+            TemplateStringPart::Expression(Value::VariableReference(name, _)) => {
+                Some(Template::Binding(name.clone()))
+            }
+            _ => None,
+        }
+    } else if ts.parts.is_empty() {
+        None
+    } else {
+        None
+    }
+}
+
+/// Convert a template string into a list of InlinePatterns for document pattern matching.
+fn template_to_inline_patterns(
+    ts: &TemplateString,
+) -> Vec<crate::instruction::template::InlinePattern> {
+    use crate::instruction::template::InlinePattern;
+
+    let mut patterns = Vec::new();
+    for part in &ts.parts {
+        match part {
+            TemplateStringPart::Literal(s) => {
+                let s = s.trim();
+                if !s.is_empty() {
+                    patterns.push(InlinePattern::Capture(s.to_string()));
+                }
+            }
+            TemplateStringPart::Expression(Value::VariableReference(name, _)) => {
+                patterns.push(InlinePattern::Capture(name.clone()));
+            }
+            _ => {}
+        }
+    }
+    patterns
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use mdl::instruction::template::Template;
+use mdl::document::{Document, DocumentNode, InlineNode};
+use mdl::instruction::template::{DocumentPattern, InlinePattern, Template};
 
 use crate::runtime_value::RuntimeValue;
 
@@ -42,13 +43,18 @@ fn match_inner(
         }
 
         Template::Strikethrough(inner) => match value {
-            RuntimeValue::Strikethrough(doc) => {
+            RuntimeValue::Strikethrough(payload) => {
                 if let Some(inner_pattern) = inner {
-                    match_inner(
-                        inner_pattern,
-                        &RuntimeValue::Document(doc.clone()),
-                        bindings,
-                    )
+                    use crate::runtime_value::StrikethroughPayload;
+                    let inner_val = match payload {
+                        StrikethroughPayload::Eager(v) => v.as_ref().clone(),
+                        StrikethroughPayload::Lazy(_) | StrikethroughPayload::Template(_) => {
+                            // Can't evaluate lazy AST/template in pattern matching (no env);
+                            // treat as opaque
+                            RuntimeValue::Unit
+                        }
+                    };
+                    match_inner(inner_pattern, &inner_val, bindings)
                 } else {
                     true
                 }
@@ -56,9 +62,11 @@ fn match_inner(
             _ => false,
         },
 
-        Template::DocumentPattern(_doc_pattern) => {
-            // TODO: full document structure matching
-            matches!(value, RuntimeValue::Document(_))
+        Template::DocumentPattern(doc_pattern) => {
+            match value {
+                RuntimeValue::Document(doc) => match_document_pattern(doc_pattern, doc, bindings),
+                _ => false,
+            }
         }
 
         Template::Alternation(alternatives) => {
@@ -91,5 +99,109 @@ fn match_inner(
                 _ => false,
             }
         }
+    }
+}
+
+/// Match a DocumentPattern against a Document.
+fn match_document_pattern(
+    pattern: &DocumentPattern,
+    doc: &Document,
+    bindings: &mut HashMap<String, RuntimeValue>,
+) -> bool {
+    match pattern {
+        DocumentPattern::Inline(inline_pat) => {
+            // Try to find a matching inline in the document's paragraphs
+            for node in &doc.nodes {
+                if let DocumentNode::Paragraph(inlines) = node {
+                    // Single inline in paragraph: match directly
+                    if inlines.len() == 1 {
+                        if match_inline_pattern(inline_pat, &inlines[0], bindings) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        DocumentPattern::Block(_block_pat) => {
+            // Block-level pattern matching — not yet needed
+            false
+        }
+    }
+}
+
+/// Match an InlinePattern against an InlineNode.
+fn match_inline_pattern(
+    pattern: &InlinePattern,
+    inline: &InlineNode,
+    bindings: &mut HashMap<String, RuntimeValue>,
+) -> bool {
+    match (pattern, inline) {
+        (InlinePattern::Text(expected), InlineNode::Text(actual)) => expected == actual,
+        (InlinePattern::Capture(name), node) => {
+            let val = inline_node_to_value(node);
+            bindings.insert(name.clone(), val);
+            true
+        }
+        (InlinePattern::Strong(sub_patterns), InlineNode::Strong(children)) => {
+            match_inline_children(sub_patterns, children, bindings)
+        }
+        (InlinePattern::Emphasis(sub_patterns), InlineNode::Emphasis(children)) => {
+            match_inline_children(sub_patterns, children, bindings)
+        }
+        (InlinePattern::Strikethrough(sub_patterns), InlineNode::Strikethrough(children)) => {
+            match_inline_children(sub_patterns, children, bindings)
+        }
+        (InlinePattern::CodeSpan(expected), InlineNode::CodeSpan(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+/// Match a list of InlinePatterns against a list of InlineNodes.
+fn match_inline_children(
+    patterns: &[InlinePattern],
+    children: &[InlineNode],
+    bindings: &mut HashMap<String, RuntimeValue>,
+) -> bool {
+    // Special case: single Capture pattern matches all children as concatenated text
+    if patterns.len() == 1 {
+        if let InlinePattern::Capture(name) = &patterns[0] {
+            let text: String = children.iter().map(|c| inline_node_to_string(c)).collect();
+            bindings.insert(name.clone(), RuntimeValue::String(text));
+            return true;
+        }
+    }
+
+    // Otherwise, match positionally
+    if patterns.len() != children.len() {
+        return false;
+    }
+    for (pat, child) in patterns.iter().zip(children) {
+        if !match_inline_pattern(pat, child, bindings) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Convert an InlineNode to a RuntimeValue.
+fn inline_node_to_value(node: &InlineNode) -> RuntimeValue {
+    match node {
+        InlineNode::Text(s) => RuntimeValue::String(s.clone()),
+        _ => RuntimeValue::String(inline_node_to_string(node)),
+    }
+}
+
+/// Convert an InlineNode to its text content.
+fn inline_node_to_string(node: &InlineNode) -> String {
+    match node {
+        InlineNode::Text(s) => s.clone(),
+        InlineNode::Strong(children) | InlineNode::Emphasis(children) | InlineNode::Strikethrough(children) => {
+            children.iter().map(|c| inline_node_to_string(c)).collect()
+        }
+        InlineNode::CodeSpan(s) => s.clone(),
+        InlineNode::SoftBreak => " ".to_string(),
+        InlineNode::HardBreak => "\n".to_string(),
+        _ => String::new(),
     }
 }

@@ -1,7 +1,6 @@
 use std::io::Write;
 use std::ops::Range;
 
-use mdl::document::Document;
 use mdl::instruction::template::template_string::{TemplateString, TemplateStringPart};
 use mdl::instruction::value::{BinaryOperator, UnaryOperator, Value};
 
@@ -11,7 +10,7 @@ use crate::executor::BlockRegistry;
 use crate::pattern;
 use crate::runtime_value::RuntimeValue;
 
-const MAX_DEPTH: usize = 256;
+pub const MAX_DEPTH: usize = 128;
 
 /// Evaluate a Value AST node to produce a RuntimeValue.
 pub fn evaluate(
@@ -92,16 +91,13 @@ pub fn evaluate(
 
         Value::SpreadArgumentReference => {
             let args = env.get_all_arguments();
-            if args.len() == 1 {
-                Ok(args[0].clone())
-            } else {
-                Ok(RuntimeValue::String(
-                    args.iter()
-                        .map(|a| a.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ))
-            }
+            Ok(RuntimeValue::String(format!(
+                "[{}]",
+                args.iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
         }
 
         // --- Operations ---
@@ -212,9 +208,26 @@ pub fn evaluate(
 
         // --- Strikethrough ---
         Value::Strikethrough(template) => {
-            // Capture as unevaluated Document
-            let doc = template_to_document(template);
-            Ok(RuntimeValue::Strikethrough(doc))
+            // Check if template contains invocations (side effects)
+            let has_invocations = template.parts.iter().any(|p| matches!(p,
+                TemplateStringPart::Expression(Value::BlockInvocation(..))
+                | TemplateStringPart::Expression(Value::EvaluatedBlockInvocation(..))
+            ));
+
+            if has_invocations {
+                // Store as unevaluated template to prevent side effects
+                Ok(RuntimeValue::Strikethrough(
+                    crate::runtime_value::StrikethroughPayload::Template(Box::new(template.clone())),
+                ))
+            } else {
+                // No invocations: eagerly evaluate interpolations
+                let inner = evaluate_template_to_value(
+                    template, env, blocks, output, depth + 1, diagnostics, source_id, instruction_span,
+                )?;
+                Ok(RuntimeValue::Strikethrough(
+                    crate::runtime_value::StrikethroughPayload::Eager(Box::new(inner)),
+                ))
+            }
         }
 
         // --- Conditional ---
@@ -258,8 +271,11 @@ pub fn evaluate(
                     ),
                     None => {
                         // Two-operand conditional: falsy → Strikethrough of unevaluated expression
-                        let doc = value_to_document(true_branch);
-                        Ok(RuntimeValue::Strikethrough(doc))
+                        Ok(RuntimeValue::Strikethrough(
+                            crate::runtime_value::StrikethroughPayload::Lazy(
+                                Box::new(true_branch.as_ref().clone()),
+                            ),
+                        ))
                     }
                 }
             }
@@ -384,9 +400,11 @@ pub fn evaluate(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Demand-evaluate a Strikethrough value by evaluating its Document contents.
+/// Demand-evaluate a Strikethrough value.
+/// - Eager: return the already-evaluated inner value.
+/// - Lazy: evaluate the stored AST expression now.
+/// - Template: evaluate the stored template now (including invocations).
 /// If the value is not a Strikethrough, returns it unchanged.
-/// Guards against infinite demand: if evaluation yields another Strikethrough, returns it as-is.
 fn demand(
     val: RuntimeValue,
     env: &mut Environment,
@@ -395,9 +413,20 @@ fn demand(
     depth: usize,
     diagnostics: &mut Vec<DiagnosticError>,
 ) -> Result<RuntimeValue, DiagnosticError> {
+    use crate::runtime_value::StrikethroughPayload;
     match val {
-        RuntimeValue::Strikethrough(doc) => {
-            crate::executor::evaluate_document(&doc, env, blocks, output, depth, diagnostics)
+        RuntimeValue::Strikethrough(StrikethroughPayload::Eager(inner)) => Ok(*inner),
+        RuntimeValue::Strikethrough(StrikethroughPayload::Lazy(ast)) => {
+            let source_id = blocks.source_id;
+            let span = 0..0;
+            evaluate(&ast, env, blocks, output, depth, diagnostics, source_id, &span)
+        }
+        RuntimeValue::Strikethrough(StrikethroughPayload::Template(ts)) => {
+            let source_id = blocks.source_id;
+            let span = 0..0;
+            evaluate_template_to_value(
+                &ts, env, blocks, output, depth, diagnostics, source_id, &span,
+            )
         }
         other => Ok(other),
     }
@@ -516,40 +545,46 @@ pub fn eval_template_string(
     Ok(result)
 }
 
-/// Convert a TemplateString to a Document (for strikethrough capture).
-fn template_to_document(ts: &TemplateString) -> Document {
-    use mdl::document::{DocumentNode, InlineNode};
-
-    let mut inlines = Vec::new();
-    for part in &ts.parts {
-        match part {
-            TemplateStringPart::Literal(s) => {
-                inlines.push(InlineNode::Text(s.clone()));
-            }
-            TemplateStringPart::Expression(_) => {
-                inlines.push(InlineNode::Text("<expr>".to_string()));
-            }
+/// Evaluate a TemplateString to a RuntimeValue.
+/// - If it has a single Expression part (no literals), returns the evaluated expression directly.
+/// - Otherwise, concatenates all parts into a String.
+fn evaluate_template_to_value(
+    ts: &TemplateString,
+    env: &mut Environment,
+    blocks: &mut BlockRegistry,
+    output: &mut dyn Write,
+    depth: usize,
+    diagnostics: &mut Vec<DiagnosticError>,
+    source_id: usize,
+    instruction_span: &Range<usize>,
+) -> Result<RuntimeValue, DiagnosticError> {
+    // Single expression with no surrounding text: return as its native type
+    if ts.parts.len() == 1 {
+        if let TemplateStringPart::Expression(expr) = &ts.parts[0] {
+            return evaluate(
+                expr, env, blocks, output, depth, diagnostics, source_id, instruction_span,
+            );
         }
     }
 
-    Document {
-        nodes: vec![DocumentNode::Paragraph(inlines)],
+    // Mixed parts or pure literal: concatenate to string
+    let mut result = String::new();
+    for part in &ts.parts {
+        match part {
+            TemplateStringPart::Literal(s) => result.push_str(s),
+            TemplateStringPart::Expression(expr) => {
+                let val = evaluate(
+                    expr, env, blocks, output, depth, diagnostics, source_id, instruction_span,
+                )?;
+                result.push_str(&val.to_string());
+            }
+        }
     }
-}
-
-/// Convert a Value AST node to a Document representation (for two-operand conditional).
-/// Preserves a human-readable Markdown form of the unevaluated expression.
-fn value_to_document(value: &Value) -> Document {
-    use mdl::document::{DocumentNode, InlineNode};
-
-    let text = value_to_markdown_text(value);
-    Document {
-        nodes: vec![DocumentNode::Paragraph(vec![InlineNode::Text(text)])],
-    }
+    Ok(RuntimeValue::String(result))
 }
 
 /// Render a Value AST node as a Markdown-like string for struck representation.
-fn value_to_markdown_text(value: &Value) -> String {
+pub fn value_to_markdown_text(value: &Value) -> String {
     match value {
         Value::StringLiteral(s) => format!("\"{}\"", s),
         Value::NumberLiteral(n) => {
@@ -578,7 +613,7 @@ fn value_to_markdown_text(value: &Value) -> String {
     }
 }
 
-fn template_to_text(ts: &mdl::instruction::template::template_string::TemplateString) -> String {
+pub fn template_to_text(ts: &mdl::instruction::template::template_string::TemplateString) -> String {
     use mdl::instruction::template::template_string::TemplateStringPart;
     let mut result = String::new();
     for part in &ts.parts {

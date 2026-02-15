@@ -1,6 +1,6 @@
 ---
 description = "Match with unit value goes to otherwise"
-expect_output = "was unit"
+expect_output = "side\nwas unit"
 ---
 # Main
 1. u = **{"side"}**

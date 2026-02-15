@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::panic;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -101,6 +102,27 @@ pub struct TestResult {
     pub path: PathBuf,
     pub description: Option<String>,
     pub outcome: TestOutcome,
+}
+
+fn run_single_test_safe(path: &Path) -> TestResult {
+    let path_buf = path.to_path_buf();
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| run_single_test(&path_buf))) {
+        Ok(result) => result,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            TestResult {
+                path: path_buf,
+                description: None,
+                outcome: TestOutcome::Fail(format!("test panicked: {}", msg)),
+            }
+        }
+    }
 }
 
 fn run_single_test(path: &Path) -> TestResult {
@@ -409,7 +431,7 @@ fn bold(s: &str, no_color: bool) -> String {
 pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
     // Single file mode — ignore categories
     if path.is_file() {
-        let result = run_single_test(path);
+        let result = run_single_test_safe(path);
         let label = result
             .description
             .as_deref()
@@ -506,7 +528,7 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
         eprintln!("{}", bold(&header, no_color));
 
         for file in *files {
-            let result = run_single_test(file);
+            let result = run_single_test_safe(file);
             let label = result
                 .description
                 .as_deref()

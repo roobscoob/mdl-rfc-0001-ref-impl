@@ -1,6 +1,21 @@
 use std::fmt;
 
 use mdl::document::Document;
+use mdl::instruction::template::template_string::TemplateString;
+use mdl::instruction::value::Value;
+
+/// The inner payload of a Strikethrough (null/falsy) value.
+#[derive(Debug, Clone)]
+pub enum StrikethroughPayload {
+    /// From `~~...~~` syntax where all parts are simple expressions (no invocations).
+    /// Content was eagerly evaluated at creation time.
+    Eager(Box<RuntimeValue>),
+    /// From two-operand conditional `false ? expr` — expression not yet evaluated.
+    Lazy(Box<Value>),
+    /// From `~~...~~` syntax that contains block invocations.
+    /// Stored as the unevaluated template to prevent side effects.
+    Template(Box<TemplateString>),
+}
 
 /// A runtime value produced by evaluating an expression.
 #[derive(Debug, Clone)]
@@ -10,8 +25,8 @@ pub enum RuntimeValue {
     String(String),
     Unit,
     Document(Document),
-    /// Strikethrough/null: contains the unevaluated Document payload.
-    Strikethrough(Document),
+    /// Strikethrough/null: wraps either an eagerly evaluated value or a lazy AST.
+    Strikethrough(StrikethroughPayload),
     /// Table: structured data with named columns and rows.
     /// One-row table = record, one-column table = array.
     Table {
@@ -59,10 +74,17 @@ impl fmt::Display for RuntimeValue {
             RuntimeValue::String(s) => write!(f, "{}", s),
             RuntimeValue::Unit => write!(f, "()"),
             RuntimeValue::Document(doc) => write!(f, "{}", doc),
-            RuntimeValue::Strikethrough(doc) => {
-                let s = format!("{}", doc);
-                write!(f, "~~{}~~", s.trim())
-            }
+            RuntimeValue::Strikethrough(payload) => match payload {
+                StrikethroughPayload::Eager(inner) => {
+                    write!(f, "~~{}~~", inner)
+                }
+                StrikethroughPayload::Lazy(ast) => {
+                    write!(f, "~~{}~~", crate::evaluator::value_to_markdown_text(ast))
+                }
+                StrikethroughPayload::Template(ts) => {
+                    write!(f, "~~{}~~", crate::evaluator::template_to_text(ts))
+                }
+            },
             RuntimeValue::Table { headers, rows } => {
                 // Render as Markdown table
                 write!(f, "|")?;
@@ -96,7 +118,10 @@ impl PartialEq for RuntimeValue {
             (RuntimeValue::String(a), RuntimeValue::String(b)) => a == b,
             (RuntimeValue::Unit, RuntimeValue::Unit) => true,
             (RuntimeValue::Document(a), RuntimeValue::Document(b)) => a == b,
-            (RuntimeValue::Strikethrough(a), RuntimeValue::Strikethrough(b)) => a == b,
+            // Two strikethroughs are equal if their display forms match
+            (RuntimeValue::Strikethrough(_), RuntimeValue::Strikethrough(_)) => {
+                self.to_string() == other.to_string()
+            }
             (
                 RuntimeValue::Table {
                     headers: h1,

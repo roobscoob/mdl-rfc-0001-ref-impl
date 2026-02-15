@@ -1,6 +1,6 @@
 ---
 description = "Match bold document pattern"
-expect_output = "bold content"
+expect_output = "hello"
 ---
 # Main
 1. doc = [](#BoldDoc)

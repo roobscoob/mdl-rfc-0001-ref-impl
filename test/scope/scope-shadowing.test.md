@@ -1,6 +1,6 @@
 ---
-description = "Sub-block writing to parent variable is visible after return"
-expect_output = "modified"
+description = "Sub-block shadows parent variable, parent unchanged after return"
+expect_output = "original"
 ---
 # Main
 1. x = "original"

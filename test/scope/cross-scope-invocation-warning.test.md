@@ -1,8 +1,6 @@
 ---
-description = "Cross-scope invocation produces warning"
-
-[[expect_warnings]]
-contains = "non-lexical scope"
+description = "Cross-scope invocation still works"
+expect_output = "crossed"
 ---
 # Main
 1. [](#OtherChild)

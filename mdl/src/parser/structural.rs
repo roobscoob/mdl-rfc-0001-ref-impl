@@ -22,11 +22,49 @@ pub fn parse_blocks(
 ) -> Result<Vec<Block>, Vec<ParseError>> {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let parser = CmarkParser::new_ext(source, options);
-    let events: Vec<(Event<'_>, Range<usize>)> = parser.into_offset_iter().collect();
+    // The mdl language doesn't use HTML. Neutralize HTML events so that
+    // characters like `<` are kept as plain text instead of being consumed
+    // as HTML tags by pulldown-cmark, then merge adjacent Text events that
+    // may have been split across event boundaries.
+    let raw_events: Vec<(Event<'_>, Range<usize>)> = parser
+        .into_offset_iter()
+        .map(|(event, range)| {
+            let event = match event {
+                Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+                other => other,
+            };
+            (event, range)
+        })
+        .collect();
+    let events = merge_adjacent_text_events(raw_events);
 
     let mut state = ParseState::new(source, file_id);
     state.process_events(&events)?;
     state.finalize()
+}
+
+/// Merge consecutive `Event::Text` events into a single event with a combined
+/// span. pulldown-cmark may split text around characters it treats specially
+/// (e.g. `<` for HTML), producing fragmented Text events. Merging them ensures
+/// downstream parsers (template strings, expressions) see complete text runs.
+fn merge_adjacent_text_events(events: Vec<(Event<'_>, Range<usize>)>) -> Vec<(Event<'_>, Range<usize>)> {
+    let mut merged: Vec<(Event<'_>, Range<usize>)> = Vec::with_capacity(events.len());
+
+    for (event, range) in events {
+        if let Event::Text(ref new_text) = event {
+            if let Some((Event::Text(prev_text), prev_range)) = merged.last_mut() {
+                // Extend the previous text event
+                let mut combined = prev_text.to_string();
+                combined.push_str(new_text);
+                *prev_text = combined.into();
+                prev_range.end = range.end;
+                continue;
+            }
+        }
+        merged.push((event, range));
+    }
+
+    merged
 }
 
 // ---------------------------------------------------------------------------
