@@ -1,6 +1,9 @@
 ---
 description = "Warning reports correct source line"
-expect_warnings = [{ contains = "before assignment", line = 2 }]
+
+[[expect_warnings]]
+contains = "before assignment"
+line = 2
 ---
 # Main
 1. **{x}**

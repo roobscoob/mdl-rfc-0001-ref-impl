@@ -1,6 +1,8 @@
 ---
 description = "Cross-scope block accessing parent var warns"
-expect_warnings = [{ contains = "non-lexical" }]
+
+[[expect_warnings]]
+contains = "non-lexical"
 ---
 # Main
 1. [](#Foreign)
