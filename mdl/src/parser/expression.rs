@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Tag, TagEnd};
+use pulldown_cmark::{CowStr, Event, Tag, TagEnd};
 
 use crate::block::reference::BlockReference;
 use crate::instruction::Instruction;
@@ -43,12 +43,15 @@ enum Token {
     Lt,
     GtEq,
     LtEq,
+    Amp,        // &
     AmpAmp,     // &&
+    Pipe,       // |
     PipePipe,   // ||
     Bang,       // !
     Question,   // ?
     Colon,      // :
     Comma,
+    Underscore, // _
 
     // Grouping
     LParen,
@@ -68,10 +71,10 @@ enum Token {
 
 #[derive(Debug, Clone)]
 struct MatchArm {
-    /// Raw text for the pattern portion (before the colon).
-    pattern_text: String,
-    /// Raw text/events for the result portion (after the colon).
-    result_events: Vec<OwnedEvent>,
+    /// Tokens for the pattern portion (before the colon).
+    pattern: (Vec<Token>, Range<usize>),
+    /// Tokens for the result portion (after the colon).
+    result: (Vec<Token>, Range<usize>),
     /// Whether this arm's pattern text starts with "otherwise".
     is_otherwise: bool,
 }
@@ -367,13 +370,13 @@ fn collect_template_string(
 fn collect_match_arms(
     events: &[(Event<'_>, Range<usize>)],
     i: &mut usize,
-    _file_id: usize,
+    file_id: usize,
     _span: Range<usize>,
 ) -> Result<Vec<MatchArm>, ParseError> {
     let mut arms = Vec::new();
 
     while *i < events.len() {
-        let (ref ev, _) = events[*i];
+        let (ref ev, ref span) = events[*i];
         match ev {
             Event::End(TagEnd::List(false)) => {
                 *i += 1;
@@ -381,7 +384,7 @@ fn collect_match_arms(
             }
             Event::Start(Tag::Item) => {
                 *i += 1;
-                let arm = collect_single_match_arm(events, i)?;
+                let arm = collect_single_match_arm(events, i, file_id, span.clone())?;
                 arms.push(arm);
             }
             _ => {
@@ -396,61 +399,68 @@ fn collect_match_arms(
 fn collect_single_match_arm(
     events: &[(Event<'_>, Range<usize>)],
     i: &mut usize,
+    file_id: usize,
+    span: Range<usize>,
 ) -> Result<MatchArm, ParseError> {
-    let mut full_text = String::new();
+    let mut pattern_span = 0..0;
+    let mut result_span = 0..0;
+    let mut pattern_events = Vec::new();
+    let mut result_events = Vec::new();
+    let mut current_span = &mut pattern_span;
+    let mut current_events = &mut pattern_events;
+    let mut writing_to_pattern = false;
 
-    // Collect all text content of this arm until End(Item)
+    // Collect all events of this arm until End(Item)
     while *i < events.len() {
-        let (ref ev, _) = events[*i];
+        let (ref ev, ref span) = events[*i];
+        if current_span.start == 0 {
+            *current_span = span.clone();
+        }
         match ev {
             Event::End(TagEnd::Item) => {
                 *i += 1;
+                current_span.end = span.end;
                 break;
             }
-            Event::Text(s) => {
-                full_text.push_str(s);
+            Event::Text(text) if !writing_to_pattern && text.contains(":") => {
                 *i += 1;
-            }
-            Event::Code(s) => {
-                // Preserve code spans as quoted strings
-                full_text.push('"');
-                full_text.push_str(s);
-                full_text.push('"');
-                *i += 1;
-            }
-            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {
-                *i += 1;
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                full_text.push(' ');
-                *i += 1;
+                let (before, after) = text.split_once(":").unwrap();
+                current_events.push((Event::Text(before.into()), current_span.end..span.start));
+                current_span.end = span.start;
+                current_events = &mut result_events;
+                current_span = &mut result_span;
+                writing_to_pattern = true;
+                *current_span = span.clone();
+                current_events.push((Event::Text(after.into()), span.clone()));
             }
             _ => {
                 *i += 1;
+                current_span.end = span.end;
+                current_events.push((ev.clone(), span.clone()));
             }
         }
     }
 
-    let full_text = full_text.trim().to_string();
-    let is_otherwise = full_text.starts_with("otherwise");
-
-    // Split at the first colon to get pattern and result
-    if let Some(colon_pos) = full_text.find(':') {
-        let pattern_text = full_text[..colon_pos].trim().to_string();
-        let result_text = full_text[colon_pos + 1..].trim().to_string();
-        Ok(MatchArm {
-            pattern_text,
-            result_events: vec![OwnedEvent::Text(result_text)],
-            is_otherwise,
-        })
+    let mut pattern = tokenize_events(&pattern_events, file_id, pattern_span.clone())?;
+    let is_otherwise = if let Some(Token::Ident(otherwise, _)) = pattern.get(0)
+        && otherwise == "otherwise" && pattern.len() >= 2 { true } else { false };
+    let (result, is_otherwise) = if is_otherwise && result_events.len() == 0 {
+        result_span = pattern_span.clone();
+        if let Some(Token::Colon) = pattern.get(2) {
+            pattern.remove(2);
+            (pattern.split_off(2), true)
+        } else {
+            (pattern.split_off(2), true)
+        }
     } else {
-        // No colon — the entire text is both pattern and result (or just otherwise binding)
-        Ok(MatchArm {
-            pattern_text: full_text.clone(),
-            result_events: vec![OwnedEvent::Text(full_text)],
-            is_otherwise,
-        })
-    }
+        (tokenize_events(&result_events, file_id, result_span.clone())?, is_otherwise)
+    };
+
+    Ok(MatchArm {
+        pattern: (pattern, pattern_span),
+        result: (result, result_span),
+        is_otherwise,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +598,8 @@ fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) {
                 if i < len && chars[i] == '&' {
                     i += 1;
                     tokens.push(Token::AmpAmp);
+                } else {
+                    tokens.push(Token::Amp);
                 }
             }
             '|' => {
@@ -595,6 +607,8 @@ fn tokenize_text(text: &str, tokens: &mut Vec<Token>, base_offset: usize) {
                 if i < len && chars[i] == '|' {
                     i += 1;
                     tokens.push(Token::PipePipe);
+                } else {
+                    tokens.push(Token::Pipe);
                 }
             }
 
@@ -656,12 +670,15 @@ enum TokenKind {
     Lt,
     GtEq,
     LtEq,
+    Amp,
     AmpAmp,
+    Pipe,
     PipePipe,
     Bang,
     Question,
     Colon,
     Comma,
+    Underscore,
     LParen,
     RParen,
     LBrace,
@@ -697,12 +714,15 @@ fn token_kind(t: &Token) -> TokenKind {
         Token::Lt => TokenKind::Lt,
         Token::GtEq => TokenKind::GtEq,
         Token::LtEq => TokenKind::LtEq,
+        Token::Amp => TokenKind::Amp,
         Token::AmpAmp => TokenKind::AmpAmp,
+        Token::Pipe => TokenKind::Pipe,
         Token::PipePipe => TokenKind::PipePipe,
         Token::Bang => TokenKind::Bang,
         Token::Question => TokenKind::Question,
         Token::Colon => TokenKind::Colon,
         Token::Comma => TokenKind::Comma,
+        Token::Underscore => TokenKind::Underscore,
         Token::LParen => TokenKind::LParen,
         Token::RParen => TokenKind::RParen,
         Token::LBrace => TokenKind::LBrace,
@@ -971,17 +991,16 @@ impl ExprParser {
 
         for arm in arms {
             if arm.is_otherwise {
-                let rest = arm.pattern_text.strip_prefix("otherwise").unwrap().trim();
-                let binding = if rest.is_empty() {
-                    None
-                } else {
-                    Some(rest.to_string())
+                let binding = match arm.pattern.0.get(0) {
+                    Some(Token::Ident(ident, _)) => Some(ident.clone()),
+                    Some(Token::Underscore) | None => None,
+                    Some(_) => return Err(ParseError::error("expected binding", arm.pattern.1, self.file_id)),
                 };
-                let result_value = self.parse_arm_result(&arm.result_events)?;
+                let result_value = self.parse_arm_result(arm.result.0, arm.result.1)?;
                 otherwise = Some((binding, Box::new(result_value)));
             } else {
-                let template = parse_pattern_text(&arm.pattern_text)?;
-                let result_value = self.parse_arm_result(&arm.result_events)?;
+                let template = parse_pattern(&arm.pattern.0, arm.pattern.1, self.file_id)?;
+                let result_value = self.parse_arm_result(arm.result.0, arm.result.1)?;
                 parsed_arms.push((template, result_value));
             }
         }
@@ -993,22 +1012,8 @@ impl ExprParser {
         })
     }
 
-    fn parse_arm_result(&self, events: &[OwnedEvent]) -> Result<Value, ParseError> {
-        // Convert OwnedEvents back to text and parse as expression
-        let mut text = String::new();
-        for ev in events {
-            match ev {
-                OwnedEvent::Text(s) => text.push_str(s),
-                _ => {}
-            }
-        }
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(Value::UnitLiteral);
-        }
-        let mut tokens = Vec::new();
-        tokenize_text(text, &mut tokens, 0);
-        let mut parser = ExprParser::new(tokens, self.span.clone(), self.file_id);
+    fn parse_arm_result(&self, tokens: Vec<Token>, span: Range<usize>) -> Result<Value, ParseError> {
+        let mut parser = ExprParser::new(tokens, span, self.file_id);
         parser.parse_expr(0)
     }
 }
@@ -1159,63 +1164,44 @@ fn parse_argument_list(
 // Pattern parsing (for match arms)
 // ---------------------------------------------------------------------------
 
-fn parse_pattern_text(
-    text: &str,
+fn parse_pattern(
+    tokens: &[Token],
+    span: Range<usize>,
+    file_id: usize,
 ) -> Result<crate::instruction::template::Template, ParseError> {
     use crate::instruction::template::Template;
+    
+    let split = tokens.split(|x| matches!(x, Token::Pipe));
+    let mut templates: Vec<Template> = Vec::new();
 
-    let text = text.trim();
-
-    // Check for alternation: a | b | c
-    if text.contains('|') {
-        let parts: Vec<&str> = text.split('|').collect();
-        if parts.len() >= 2 {
-            let alternatives: Vec<Template> = parts
-                .iter()
-                .map(|p| parse_single_pattern(p))
-                .collect::<Result<_, _>>()?;
-            return Ok(Template::Alternation(alternatives));
-        }
+    for ele in split {
+        templates.push(parse_single_pattern(ele, span.clone(), file_id)?);
     }
 
-    parse_single_pattern(text)
+    if templates.len() == 1 {
+        return Ok(templates.remove(0))
+    }
+
+    return Ok(Template::Alternation(templates))
 }
 
 fn parse_single_pattern(
-    text: &str,
+    tokens: &[Token],
+    span: Range<usize>,
+    file_id: usize,
 ) -> Result<crate::instruction::template::Template, ParseError> {
     use crate::instruction::template::Template;
 
-    let text = text.trim();
-
-    // Try number
-    if let Ok(n) = text.parse::<f64>() {
-        return Ok(Template::NumberLiteral(n));
+    match tokens {
+        [Token::Number(value)] => Ok(Template::NumberLiteral(*value)),
+        [Token::True] => Ok(Template::BooleanLiteral(true)),
+        [Token::False] => Ok(Template::BooleanLiteral(false)),
+        [Token::Unit] => Ok(Template::UnitLiteral),
+        [Token::StringLit(string)] => Ok(Template::StringLiteral(string.clone())),
+        [Token::Underscore] => Ok(Template::Wildcard),
+        [Token::Ident(ident, _span)] => Ok(Template::Binding(ident.clone())),
+        _ => Err(ParseError::error(
+            "expected pattern", span, file_id
+        ))
     }
-
-    // Try boolean
-    if text == "true" {
-        return Ok(Template::BooleanLiteral(true));
-    }
-    if text == "false" {
-        return Ok(Template::BooleanLiteral(false));
-    }
-
-    // Try unit
-    if text == "()" {
-        return Ok(Template::UnitLiteral);
-    }
-
-    // Try string literal
-    if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
-        return Ok(Template::StringLiteral(text[1..text.len() - 1].to_string()));
-    }
-
-    // Wildcard
-    if text == "_" {
-        return Ok(Template::Wildcard);
-    }
-
-    // Otherwise treat as a binding
-    Ok(Template::Binding(text.to_string()))
 }
