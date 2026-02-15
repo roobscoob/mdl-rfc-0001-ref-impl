@@ -128,6 +128,14 @@ fn run_single_test(path: &Path) -> TestResult {
         }
     };
 
+    if config.expect_parse_error == false
+        && config.expect_error.is_none()
+        && config.expect_output.is_none()
+        && config.expect_warnings.is_none()
+    {
+        panic!("test {} has no expectations defined", path.display());
+    }
+
     let description = config.description.clone();
 
     // 3. Parse mdl source
@@ -153,10 +161,7 @@ fn run_single_test(path: &Path) -> TestResult {
             return TestResult {
                 path: path.to_path_buf(),
                 description,
-                outcome: TestOutcome::Fail(format!(
-                    "unexpected parse error: {}",
-                    msgs.join("; ")
-                )),
+                outcome: TestOutcome::Fail(format!("unexpected parse error: {}", msgs.join("; "))),
             };
         }
     };
@@ -365,17 +370,29 @@ pub fn list_categories(path: &Path) {
 
     eprintln!("available categories:");
     for (cat, files) in &categories {
-        let label = if cat.is_empty() { "(root)" } else { cat.as_str() };
+        let label = if cat.is_empty() {
+            "(root)"
+        } else {
+            cat.as_str()
+        };
         eprintln!("  {} ({} tests)", label, files.len());
     }
 }
 
 fn pass_label(no_color: bool) -> &'static str {
-    if no_color { "PASS" } else { "\x1b[32mPASS\x1b[0m" }
+    if no_color {
+        "PASS"
+    } else {
+        "\x1b[32mPASS\x1b[0m"
+    }
 }
 
 fn fail_label(no_color: bool) -> &'static str {
-    if no_color { "FAIL" } else { "\x1b[31mFAIL\x1b[0m" }
+    if no_color {
+        "FAIL"
+    } else {
+        "\x1b[31mFAIL\x1b[0m"
+    }
 }
 
 fn bold(s: &str, no_color: bool) -> String {
@@ -396,16 +413,15 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
         let label = result
             .description
             .as_deref()
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-            });
+            .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("?"));
         return match &result.outcome {
             TestOutcome::Pass => {
                 eprintln!("  {}  {}", pass_label(no_color), label);
                 eprintln!();
-                eprintln!("test result: {}. 1 passed, 0 failed", if no_color { "ok" } else { "\x1b[32mok\x1b[0m" });
+                eprintln!(
+                    "test result: {}. 1 passed, 0 failed",
+                    if no_color { "ok" } else { "\x1b[32mok\x1b[0m" }
+                );
                 0
             }
             TestOutcome::Fail(reason) => {
@@ -418,8 +434,14 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
                     eprintln!("  {}", line);
                 }
                 eprintln!();
-                eprintln!("test result: {}. 0 passed, 1 failed (of 1)",
-                    if no_color { "FAILED" } else { "\x1b[31mFAILED\x1b[0m" });
+                eprintln!(
+                    "test result: {}. 0 passed, 1 failed (of 1)",
+                    if no_color {
+                        "FAILED"
+                    } else {
+                        "\x1b[31mFAILED\x1b[0m"
+                    }
+                );
                 1
             }
         };
@@ -434,7 +456,10 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
 
     // Filter categories if specified
     let run_categories: BTreeMap<&str, &Vec<PathBuf>> = if categories.is_empty() {
-        all_categories.iter().map(|(k, v)| (k.as_str(), v)).collect()
+        all_categories
+            .iter()
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
     } else {
         let mut filtered = BTreeMap::new();
         for requested in categories {
@@ -485,11 +510,7 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
             let label = result
                 .description
                 .as_deref()
-                .unwrap_or_else(|| {
-                    file.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("?")
-                });
+                .unwrap_or_else(|| file.file_stem().and_then(|s| s.to_str()).unwrap_or("?"));
 
             match &result.outcome {
                 TestOutcome::Pass => {
@@ -526,7 +547,10 @@ pub fn run_tests(path: &Path, no_color: bool, categories: &[String]) -> i32 {
         if no_color {
             eprintln!("test result: ok. {} passed, 0 failed", passed);
         } else {
-            eprintln!("test result: \x1b[32mok\x1b[0m. {} passed, 0 failed", passed);
+            eprintln!(
+                "test result: \x1b[32mok\x1b[0m. {} passed, 0 failed",
+                passed
+            );
         }
         0
     } else {
