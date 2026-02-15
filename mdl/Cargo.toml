@@ -1,0 +1,8 @@
+[package]
+name = "mdl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+codespan-reporting = "0.13.1"
+pulldown-cmark = { version = "0.13.0", features = ["simd"] }
