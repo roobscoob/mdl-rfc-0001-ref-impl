@@ -1,7 +1,6 @@
 ---
 description = "Unit is falsy"
-expect_output = "side\nno"
+expect_output = "no"
 ---
 # Main
-1. u = **{"side"}**
-2. **{u ? "yes" : "no"}**
+1. **{() ? "yes" : "no"}**

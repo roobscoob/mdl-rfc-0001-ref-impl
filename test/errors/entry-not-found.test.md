@@ -4,4 +4,4 @@ entry = "NonExistent"
 expect_error = "NonExistent"
 ---
 # Main
-1. **{"hello"}**
+1. **hello**

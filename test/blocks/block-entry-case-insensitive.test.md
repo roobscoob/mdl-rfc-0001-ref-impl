@@ -4,4 +4,4 @@ entry = "MAIN"
 expect_output = "found"
 ---
 # Main
-1. **{"found"}**
+1. **found**

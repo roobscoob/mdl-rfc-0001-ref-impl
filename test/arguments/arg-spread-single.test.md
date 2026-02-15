@@ -1,6 +1,6 @@
 ---
 description = "Spread argument with single arg"
-expect_output = "42"
+expect_output = "[42]"
 ---
 # Main
 1. [42](#Echo)

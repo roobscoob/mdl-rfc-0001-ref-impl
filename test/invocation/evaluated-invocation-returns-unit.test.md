@@ -7,4 +7,4 @@ expect_output = "side effect\n()"
 2. **{x}**
 
 ## Sub
-**{"side effect"}**
+**side effect**

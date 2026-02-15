@@ -6,4 +6,4 @@ expect_output = "invoked"
 1. true ? [](#Sub)
 
 ## Sub
-1. **{"invoked"}**
+1. **invoked**

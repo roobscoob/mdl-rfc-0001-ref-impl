@@ -1,5 +1,6 @@
 ---
 description = "Spread argument with multiple args"
+expect_output = "[1, 2, 3]"
 ---
 # Main
 1. [1, 2, 3](#Echo)

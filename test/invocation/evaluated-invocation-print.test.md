@@ -1,9 +1,9 @@
 ---
-description = "Evaluated invocation runs print in Document"
-expect_output = "from eval"
+description = "Evaluated invocation runs print and evaluates Document"
+expect_output = "2"
 ---
 # Main
 1. ![](#Sub)
 
 ## Sub
-**{"from eval"}**
+**{1 + 1}**

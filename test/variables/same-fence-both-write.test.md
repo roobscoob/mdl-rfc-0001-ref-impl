@@ -1,5 +1,8 @@
 ---
-description = "Two assignments at same fence do not crash"
+description = "Two assignments at same fence do not crash, but produce warning"
+
+[[expect_warnings]]
+contains = "same fence"
 ---
 # Main
 1. x = 1

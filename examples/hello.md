@@ -1,9 +1,8 @@
 # Main
-1. **{"Hello, world!"}**
+1. **Hello, world!**
 
 ## Greet
-1. **{"Hello, "}**
-2. **{#0}**
+1. **Hello, {#0}**
 
 ## Add
 1. result = #0 + #1

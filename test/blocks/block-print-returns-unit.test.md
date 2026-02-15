@@ -6,4 +6,4 @@ expect_output = "hello\n()"
 1. **{[](#Printer)}**
 
 ## Printer
-1. **{"hello"}**
+1. **hello**

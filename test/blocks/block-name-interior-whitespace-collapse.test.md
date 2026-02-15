@@ -4,4 +4,4 @@ entry = "A B"
 expect_output = "collapsed"
 ---
 # A  B
-1. **{"collapsed"}**
+1. **collapsed**

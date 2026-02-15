@@ -1,9 +1,9 @@
 ---
-description = "First top-level block is the default entry point"
-expect_output = "first"
+description = "Main is the default entry point"
+expect_output = "main"
 ---
 # Main
-1. **{"first"}**
+1. **main**
 
 # Other
-1. **{"second"}**
+1. **other**

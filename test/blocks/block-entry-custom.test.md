@@ -4,7 +4,7 @@ entry = "Start"
 expect_output = "started"
 ---
 # Main
-1. **{"main"}**
+1. **main**
 
 # Start
-1. **{"started"}**
+1. **started**

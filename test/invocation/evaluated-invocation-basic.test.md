@@ -6,4 +6,4 @@ expect_output = "printed"
 1. ![](#Printer)
 
 ## Printer
-**{"printed"}**
+**printed**

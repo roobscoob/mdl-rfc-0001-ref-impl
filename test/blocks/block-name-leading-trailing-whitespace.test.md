@@ -4,4 +4,4 @@ entry = "Main"
 expect_output = "trimmed"
 ---
 #   Main
-1. **{"trimmed"}**
+1. **trimmed**

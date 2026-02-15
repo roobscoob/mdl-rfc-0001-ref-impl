@@ -1,6 +1,6 @@
 ---
 description = "Two-operand conditional falsy produces Strikethrough"
-expect_output = "~~"
+expect_output = "~~\"gone\"~~"
 ---
 # Main
 1. x = false ? "gone"

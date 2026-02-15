@@ -1,5 +1,6 @@
 ---
 description = "Spread argument with no args"
+expect_output = "[]"
 ---
 # Main
 1. [](#Echo)

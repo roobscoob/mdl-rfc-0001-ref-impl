@@ -4,4 +4,4 @@ entry = "My Block"
 expect_output = "multi word"
 ---
 # My Block
-1. **{"multi word"}**
+1. **multi word**
