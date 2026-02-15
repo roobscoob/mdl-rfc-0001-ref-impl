@@ -1,6 +1,8 @@
 ---
 description = "Hoisted variable does not produce unknown variable error"
-expect_warnings = [{ contains = "before assignment" }]
+
+[[expect_warnings]]
+contains = "before assignment"
 ---
 # Main
 1. **{x}**

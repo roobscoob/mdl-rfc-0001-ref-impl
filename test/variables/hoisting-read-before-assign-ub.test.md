@@ -1,6 +1,8 @@
 ---
 description = "Reading variable before assignment is UB (warning)"
-expect_warnings = [{ contains = "before assignment" }]
+
+[[expect_warnings]]
+contains = "before assignment"
 ---
 # Main
 1. **{x}**
